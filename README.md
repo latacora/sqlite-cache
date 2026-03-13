@@ -222,6 +222,25 @@ The predicate function receives a cache entry map with these keys:
 
 All deletion functions automatically run cache maintenance (expiring old entries and vacuuming) after deletion.
 
+### Visual Cache Analysis
+
+The project includes an interactive [Clerk](https://clerk.vision/) notebook for visual analysis of cache contents. It provides charts and statistics for:
+
+- Cache size contribution by function (stacked bar chart of args vs results)
+- Size distribution analysis with box plots (log scale)
+- Compression efficiency analysis (Transit+zstd vs EDN size)
+- Temporal analysis: cache entry age, access patterns, and expiry boundaries
+- Hit count distribution by function
+
+To launch:
+
+```bash
+bb visual-analysis          # uses default sqlite-cache.db
+bb visual-analysis path.db  # specify a database path
+```
+
+This opens a browser with live-updating visualizations. Useful for understanding cache usage patterns, identifying oversized entries, and tuning TTL/max-age settings.
+
 ## Implementation Details
 
 ### Serialization
