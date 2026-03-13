@@ -1,0 +1,25 @@
+{:tasks
+ {test
+  {:doc "Run tests, passing additional arguments to kaocha"
+   :task (apply clojure "-M:dev:test" *command-line-args*)}
+
+  -clj-kondo
+  {:doc "Run clj-kondo"
+   :task (shell "clj-kondo --lint src test notebooks")}
+
+  lint
+  {:doc "Run all linters"
+   :depends [-clj-kondo]
+   :task (println "✅ All linting complete.")}
+
+  visual-analysis
+  {:doc "Launch interactive visual analysis of cache contents. Usage: bb visual-analysis [db-path]"
+   :task (let [db-path (first *command-line-args*)
+               env (when db-path {"CACHE_DB_PATH" db-path})]
+           (shell {:extra-env env}
+                  "clojure -M:clerk -e \"(require '[nextjournal.clerk :as clerk])\" -e \"(clerk/serve! {:browse? true :watch-paths [\\\"notebooks\\\"]})\""
+                  ))}
+
+  maint
+  {:doc "Check for outdated dependencies using antq"
+   :task (shell "clojure -Sdeps '{:deps {com.github.liquidz/antq {:mvn/version \"RELEASE\"}}}' -M -m antq.core")}}}
