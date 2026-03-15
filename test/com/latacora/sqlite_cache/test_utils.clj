@@ -4,7 +4,7 @@
    [com.latacora.sqlite-cache.core :as c]
    [com.latacora.sqlite-cache.ddl :as ddl]
    [com.latacora.sqlite-cache.maintenance :as maint]
-   [com.latacora.sqlite-cache.bridge :as sqlite]
+   [com.latacora.sqlite.bridge :as sqlite]
    [next.jdbc :as jdbc]
    [clojure.test :as t])
   (:import

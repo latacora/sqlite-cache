@@ -12,7 +12,7 @@
    [honey.sql.helpers :as h]
    [next.jdbc :as jdbc]
    [next.jdbc.result-set :as rs]
-   [com.latacora.sqlite-cache.bridge :as bridge]
+   [com.latacora.sqlite.bridge :as bridge]
    [com.latacora.sqlite-cache.serialization :as ser]
    [com.latacora.sqlite-cache.db :as db]
    [com.latacora.sqlite-cache.ddl :as ddl])

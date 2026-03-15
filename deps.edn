@@ -7,6 +7,10 @@
   org.xerial/sqlite-jdbc {:mvn/version "3.50.3.0"}
   com.github.seancorfield/honeysql {:mvn/version "2.7.1350"}
 
+  ;; SQLite bridge (UDFs, listeners, etc.)
+  io.github.latacora/clj-sqlite-bridge {:git/url "https://github.com/latacora/clj-sqlite-bridge"
+                                         :git/sha "23631acb83d5fcf3d4f4b18ddbd388a3311367f7"}
+
   ;; Serialization (includes compression)
   io.github.latacora/transit-canon {:git/url "https://github.com/latacora/transit-canon"
                                      :git/sha "06fe41e2522b83bab7e955e3473376500887abc6"}}
