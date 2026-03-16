@@ -1,4 +1,5 @@
-{:tasks
+{:deps {io.github.borkdude/unused-deps {:git/sha "c6673b5549d02fa131d21b61695e283b18124b59"}}
+ :tasks
  {test
   {:doc "Run tests, passing additional arguments to kaocha"
    :task (apply clojure "-M:dev:test" *command-line-args*)}
@@ -7,9 +8,21 @@
   {:doc "Run clj-kondo"
    :task (shell "clj-kondo --lint src test notebooks")}
 
+  -unused-deps
+  {:doc "Check for unused dependencies"
+   :requires ([borkdude.unused-deps :as ud])
+   :task (let [;; JDBC drivers are loaded at runtime, not via require
+               known-false-positives #{'org.xerial/sqlite-jdbc}
+               result (ud/unused-deps {:source-paths ["src" "test"]})
+               unexpected (remove (comp known-false-positives first) (:unused-deps result))]
+           (when (seq unexpected)
+             (println "Unused dependencies found:")
+             (doseq [dep unexpected] (prn dep))
+             (System/exit 1)))}
+
   lint
   {:doc "Run all linters"
-   :depends [-clj-kondo]
+   :depends [-clj-kondo -unused-deps]
    :task (println "✅ All linting complete.")}
 
   visual-analysis
