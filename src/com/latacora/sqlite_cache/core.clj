@@ -21,7 +21,6 @@
    [com.latacora.sqlite-cache.ddl :as ddl]
    [com.latacora.sqlite-cache.maintenance :as maint])
   (:import
-   (java.time Instant)
    (java.util.concurrent LinkedBlockingQueue TimeUnit)))
 
 ;; This currently does not use clojure.core.cache, but it probably could stand
@@ -249,15 +248,6 @@
     (jdbc/execute-one! read-conn ddl/read-only-stmt)
     (-> cached (partial opts) (with-meta opts))))
 
-(defn- maybe-inst [epoch-second]
-  (when epoch-second (Instant/ofEpochSecond epoch-second)))
-
-(defn- cold-at? [created-at last-hit ttl]
-  (<= (+ (or last-hit created-at) ttl) (quot (System/currentTimeMillis) 1000)))
-
-(defn- stale-at? [created-at max-age]
-  (<= (+ created-at max-age) (quot (System/currentTimeMillis) 1000)))
-
 (defn entry-status
   "Returns status for the cache entry matching cache-args, or nil if no entry exists.
 
@@ -271,20 +261,25 @@
   - :cold?       true if past TTL (evictable if not re-hit soon)
   - :stale?      true if past max-age (will be evicted unconditionally)"
   [cached-fn cache-args]
-  (let [{:keys [read-conn func-name args-cache-key ttl max-age]} (meta cached-fn)
+  (let [{:keys [read-conn func-name args-cache-key]} (meta cached-fn)
         serialized-args (ser/serialize (args-cache-key cache-args))
-        q (-> (h/select :hits :last-hit :created-at)
+        q (-> (h/select :hits
+                        [maint/goes-cold-at :goes-cold-at]
+                        [maint/goes-stale-at :goes-stale-at]
+                        [maint/cold? :cold?]
+                        [maint/stale? :stale?]
+                        [:created-at :created-at]
+                        [:last-hit :last-hit])
               (h/from :cache)
               (h/where [:= :function func-name]
                        [:= :args serialized-args]))
         row (db/exec-one! read-conn q)]
     (when row
-      (let [{:keys [hits last-hit created-at]} row]
-        {:created-at (maybe-inst created-at)
-         :last-hit   (maybe-inst last-hit)
-         :hits       hits
-         :cold?      (cold-at? created-at last-hit ttl)
-         :stale?     (stale-at? created-at max-age)}))))
+      (-> row
+          (update :created-at maint/maybe-inst)
+          (update :last-hit maint/maybe-inst)
+          (update :cold? pos?)
+          (update :stale? pos?)))))
 
 (defn function-entries
   "Returns status for every live cache entry belonging to cached-fn.
@@ -297,18 +292,22 @@
   - :cold?       true if past TTL (evictable if not re-hit soon)
   - :stale?      true if past max-age (will be evicted unconditionally)"
   [cached-fn]
-  (let [{:keys [read-conn func-name ttl max-age]} (meta cached-fn)
-        q (-> (h/select :args :hits :last-hit :created-at)
+  (let [{:keys [read-conn func-name]} (meta cached-fn)
+        q (-> (h/select :args :hits
+                        [maint/cold? :cold?]
+                        [maint/stale? :stale?]
+                        [:created-at :created-at]
+                        [:last-hit :last-hit])
               (h/from :cache)
               (h/where [:= :function func-name]))
         rows (db/exec! read-conn q)]
-    (map (fn [{:keys [args hits last-hit created-at]}]
-           {:args       (ser/deserialize args)
-            :created-at (maybe-inst created-at)
-            :last-hit   (maybe-inst last-hit)
-            :hits       hits
-            :cold?      (cold-at? created-at last-hit ttl)
-            :stale?     (stale-at? created-at max-age)})
+    (map (fn [row]
+           (-> row
+               (update :args ser/deserialize)
+               (update :created-at maint/maybe-inst)
+               (update :last-hit maint/maybe-inst)
+               (update :cold? pos?)
+               (update :stale? pos?)))
          rows)))
 
 (defn cached-var

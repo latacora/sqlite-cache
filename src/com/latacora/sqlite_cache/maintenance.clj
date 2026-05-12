@@ -87,7 +87,7 @@
 ;; Predicate Infrastructure
 ;; ============================================================================
 
-(defn ^:private maybe-inst
+(defn maybe-inst
   "Converts an epoch second to an Instant, or returns nil if input is nil."
   [epoch-second]
   (when epoch-second
