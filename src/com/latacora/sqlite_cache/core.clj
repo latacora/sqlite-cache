@@ -21,6 +21,7 @@
    [com.latacora.sqlite-cache.ddl :as ddl]
    [com.latacora.sqlite-cache.maintenance :as maint])
   (:import
+   (java.time Instant)
    (java.util.concurrent LinkedBlockingQueue TimeUnit)))
 
 ;; This currently does not use clojure.core.cache, but it probably could stand
@@ -247,6 +248,68 @@
     (jdbc/execute-one! read-conn ddl/busy-timeout-stmt)
     (jdbc/execute-one! read-conn ddl/read-only-stmt)
     (-> cached (partial opts) (with-meta opts))))
+
+(defn- maybe-inst [epoch-second]
+  (when epoch-second (Instant/ofEpochSecond epoch-second)))
+
+(defn- cold-at? [created-at last-hit ttl]
+  (<= (+ (or last-hit created-at) ttl) (quot (System/currentTimeMillis) 1000)))
+
+(defn- stale-at? [created-at max-age]
+  (<= (+ created-at max-age) (quot (System/currentTimeMillis) 1000)))
+
+(defn entry-status
+  "Returns status for the cache entry matching cache-args, or nil if no entry exists.
+
+  cached-fn is the value returned by `cache` or `cached-var`.
+  cache-args is the argument list that would be passed to the cached function.
+
+  Returns a map with:
+  - :created-at  java.time.Instant when the entry was first computed
+  - :last-hit    java.time.Instant of last read, or nil if never re-hit
+  - :hits        number of cache hits
+  - :cold?       true if past TTL (evictable if not re-hit soon)
+  - :stale?      true if past max-age (will be evicted unconditionally)"
+  [cached-fn cache-args]
+  (let [{:keys [read-conn func-name args-cache-key ttl max-age]} (meta cached-fn)
+        serialized-args (ser/serialize (args-cache-key cache-args))
+        q (-> (h/select :hits :last-hit :created-at)
+              (h/from :cache)
+              (h/where [:= :function func-name]
+                       [:= :args serialized-args]))
+        row (db/exec-one! read-conn q)]
+    (when row
+      (let [{:keys [hits last-hit created-at]} row]
+        {:created-at (maybe-inst created-at)
+         :last-hit   (maybe-inst last-hit)
+         :hits       hits
+         :cold?      (cold-at? created-at last-hit ttl)
+         :stale?     (stale-at? created-at max-age)}))))
+
+(defn function-entries
+  "Returns status for every live cache entry belonging to cached-fn.
+
+  Each map in the returned sequence contains:
+  - :args        deserialized arguments (as stored by args-cache-key)
+  - :created-at  java.time.Instant when the entry was first computed
+  - :last-hit    java.time.Instant of last read, or nil if never re-hit
+  - :hits        number of cache hits
+  - :cold?       true if past TTL (evictable if not re-hit soon)
+  - :stale?      true if past max-age (will be evicted unconditionally)"
+  [cached-fn]
+  (let [{:keys [read-conn func-name ttl max-age]} (meta cached-fn)
+        q (-> (h/select :args :hits :last-hit :created-at)
+              (h/from :cache)
+              (h/where [:= :function func-name]))
+        rows (db/exec! read-conn q)]
+    (map (fn [{:keys [args hits last-hit created-at]}]
+           {:args       (ser/deserialize args)
+            :created-at (maybe-inst created-at)
+            :last-hit   (maybe-inst last-hit)
+            :hits       hits
+            :cold?      (cold-at? created-at last-hit ttl)
+            :stale?     (stale-at? created-at max-age)})
+         rows)))
 
 (defn cached-var
   "A helper function for `cache` that configures the cache name based on the
