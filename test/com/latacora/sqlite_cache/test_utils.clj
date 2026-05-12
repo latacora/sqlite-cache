@@ -168,6 +168,7 @@
                       base-cached-fn)]
       (handler (assoc ctx
                       :cached-fn cached-fn
+                      :base-cached-fn base-cached-fn
                       :assert-n-entries! (partial assert-n-entries! base-cached-fn)
                       :sync-write-queue! (partial sync-write-queue! base-cached-fn))))))
 

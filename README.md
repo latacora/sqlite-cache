@@ -139,6 +139,35 @@ For bulk operations that might trigger multiple maintenance runs, you can use `w
   )
 ```
 
+### Cache entry introspection
+
+You can inspect the status of a specific cache entry, or all entries for a cached function, directly from the cache handle — without a separate database connection or knowledge of the internal schema:
+
+```clojure
+;; cached-api-call is the value returned by cache/cache (see Basic Usage above)
+
+;; Single-entry lookup: pass the args you would pass to the cached fn
+(cache/entry-status cached-api-call {:query "something"})
+;; => {:created-at #inst "2026-05-10T14:32:00Z"
+;;     :last-hit   #inst "2026-05-12T09:00:00Z"   ; nil if never re-hit
+;;     :hits       7
+;;     :cold?      false   ; true if past TTL — eligible for eviction
+;;     :stale?     false}  ; true if past max-age — will be evicted unconditionally
+;; or nil if no matching entry exists
+
+;; Bulk lookup: all entries for this cached function
+(cache/function-entries cached-api-call)
+;; => [{:args       {:query "something"}
+;;      :created-at #inst "2026-05-10T14:32:00Z"
+;;      :last-hit   #inst "2026-05-12T09:00:00Z"
+;;      :hits       7
+;;      :cold?      false
+;;      :stale?     false}
+;;     ...]
+```
+
+Both functions use the same `args-cache-key` and serialization logic as the cache itself, so the key lookup is always consistent with what the cache stores.
+
 ### Error Handling
 
 The cache properly handles exceptions from cached functions. When a cached function throws an exception, it is propagated to the caller without caching the error. This ensures that transient errors don't get permanently cached.

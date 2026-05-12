@@ -4,6 +4,8 @@
    [com.latacora.sqlite-cache.maintenance :as maint]
    [com.latacora.sqlite-cache.test-utils :as tu]
    [clojure.test :as t]
+   [com.gfredericks.test.chuck.clojure-test :refer [checking]]
+   [clojure.test.check.generators :as gen]
    [next.jdbc :as jdbc]
    [honey.sql.helpers :as h]
    [honey.sql :as hsql])
@@ -554,6 +556,82 @@
 
       ;; Should run exactly once after all blocks
       (t/is (= @maintenance-calls 1) "Maintenance ran exactly once after all blocks"))))
+
+(t/deftest entry-status-test
+  (tu/with-harness
+    (fn [{:keys [cached-fn base-cached-fn]}]
+      (t/is (nil? (c/entry-status base-cached-fn 1 1))
+            "returns nil before any call")
+
+      (cached-fn 1 1)
+
+      (let [status (c/entry-status base-cached-fn 1 1)]
+        (t/is (some? status) "returns a map after a call")
+        (t/is (instance? java.time.Instant (:created-at status)))
+        (t/is (nil? (:last-hit status)) "no hits yet")
+        (t/is (= 0 (:hits status)))
+        (t/is (false? (:cold? status)))
+        (t/is (false? (:stale? status))))
+
+      (cached-fn 1 1)
+
+      (let [status (c/entry-status base-cached-fn 1 1)]
+        (t/is (= 1 (:hits status)))
+        (t/is (instance? java.time.Instant (:last-hit status))))
+
+      (t/is (nil? (c/entry-status base-cached-fn 9 9))
+            "returns nil for args with no entry"))))
+
+(t/deftest entry-status-cold-stale-test
+  (tu/with-harness
+    (fn [{:keys [cached-fn base-cached-fn advance-clock!]}]
+      (cached-fn 1 1)
+
+      (advance-clock! c/default-ttl)
+      (let [status (c/entry-status base-cached-fn 1 1)]
+        (t/is (true? (:cold? status)) "cold after TTL elapses")
+        (t/is (false? (:stale? status))))
+
+      (advance-clock! (- c/default-max-age c/default-ttl))
+      (let [status (c/entry-status base-cached-fn 1 1)]
+        (t/is (true? (:stale? status)) "stale after max-age elapses")))))
+
+(t/deftest function-entries-test
+  (tu/with-harness
+    (fn [{:keys [cached-fn base-cached-fn]}]
+      (t/is (empty? (c/function-entries base-cached-fn))
+            "empty before any calls")
+
+      (cached-fn 1 1)
+      (cached-fn 1 2)
+
+      (let [entries (c/function-entries base-cached-fn)]
+        (t/is (= 2 (count entries)))
+        (t/is (every? #(instance? java.time.Instant (:created-at %)) entries))
+        (t/is (every? #(nil? (:last-hit %)) entries))
+        (t/is (every? #(false? (:cold? %)) entries))
+        (t/is (every? #(false? (:stale? %)) entries))
+        (t/is (= #{(list 1 1) (list 1 2)}
+                 (into #{} (map :args) entries)))))))
+
+(t/deftest entry-status-zero-arity-test
+  (tu/with-harness
+    {:f (constantly 42)}
+    (fn [{:keys [cached-fn base-cached-fn]}]
+      (t/is (nil? (c/entry-status base-cached-fn))
+            "returns nil before call")
+      (cached-fn)
+      (t/is (some? (c/entry-status base-cached-fn))
+            "finds entry for 0-arity call"))))
+
+(t/deftest entry-status-key-matches-store-generative-test
+  (checking 50 [args (gen/list gen/small-integer)]
+    (tu/with-harness
+      {:f (fn [& _] :result) :auto-sync true}
+      (fn [{:keys [cached-fn base-cached-fn]}]
+        (apply cached-fn args)
+        (t/is (some? (apply c/entry-status base-cached-fn args))
+              (str "entry-status finds row for args: " (pr-str args)))))))
 
 (t/deftest function-error-caching-bug-test
   "Test that demonstrates the critical bug where function exceptions get cached forever.
