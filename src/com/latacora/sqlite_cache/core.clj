@@ -248,6 +248,23 @@
     (jdbc/execute-one! read-conn ddl/read-only-stmt)
     (-> cached (partial opts) (with-meta opts))))
 
+(defn ^:private coerce-status-row [row]
+  (-> row
+      (update :created-at maint/maybe-inst)
+      (update :last-hit maint/maybe-inst)
+      (update :cold? pos?)
+      (update :stale? pos?)))
+
+(defn ^:private status-base-query [func-name & extra-cols]
+  (-> (apply h/select :hits
+             [maint/cold? :cold?]
+             [maint/stale? :stale?]
+             [:created-at :created-at]
+             [:last-hit :last-hit]
+             extra-cols)
+      (h/from :cache)
+      (h/where [:= :function func-name])))
+
 (defn entry-status
   "Returns status for the cache entry matching cache-args, or nil if no entry exists.
 
@@ -262,24 +279,10 @@
   - :stale?      true if past max-age (will be evicted unconditionally)"
   [cached-fn cache-args]
   (let [{:keys [read-conn func-name args-cache-key]} (meta cached-fn)
-        serialized-args (ser/serialize (args-cache-key cache-args))
-        q (-> (h/select :hits
-                        [maint/goes-cold-at :goes-cold-at]
-                        [maint/goes-stale-at :goes-stale-at]
-                        [maint/cold? :cold?]
-                        [maint/stale? :stale?]
-                        [:created-at :created-at]
-                        [:last-hit :last-hit])
-              (h/from :cache)
-              (h/where [:= :function func-name]
-                       [:= :args serialized-args]))
-        row (db/exec-one! read-conn q)]
-    (when row
-      (-> row
-          (update :created-at maint/maybe-inst)
-          (update :last-hit maint/maybe-inst)
-          (update :cold? pos?)
-          (update :stale? pos?)))))
+        serialized-args (ser/serialize (args-cache-key (seq cache-args)))
+        q (-> (status-base-query func-name)
+              (h/where [:= :args serialized-args]))]
+    (some-> (db/exec-one! read-conn q) coerce-status-row)))
 
 (defn function-entries
   "Returns status for every live cache entry belonging to cached-fn.
@@ -293,22 +296,9 @@
   - :stale?      true if past max-age (will be evicted unconditionally)"
   [cached-fn]
   (let [{:keys [read-conn func-name]} (meta cached-fn)
-        q (-> (h/select :args :hits
-                        [maint/cold? :cold?]
-                        [maint/stale? :stale?]
-                        [:created-at :created-at]
-                        [:last-hit :last-hit])
-              (h/from :cache)
-              (h/where [:= :function func-name]))
-        rows (db/exec! read-conn q)]
-    (map (fn [row]
-           (-> row
-               (update :args ser/deserialize)
-               (update :created-at maint/maybe-inst)
-               (update :last-hit maint/maybe-inst)
-               (update :cold? pos?)
-               (update :stale? pos?)))
-         rows)))
+        q (status-base-query func-name :args)]
+    (->> (db/exec! read-conn q)
+         (map #(-> % (update :args ser/deserialize) coerce-status-row)))))
 
 (defn cached-var
   "A helper function for `cache` that configures the cache name based on the

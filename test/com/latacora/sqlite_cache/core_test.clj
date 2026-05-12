@@ -555,6 +555,63 @@
       ;; Should run exactly once after all blocks
       (t/is (= @maintenance-calls 1) "Maintenance ran exactly once after all blocks"))))
 
+(t/deftest entry-status-test
+  (tu/with-harness
+    (fn [{:keys [cached-fn base-cached-fn]}]
+      (t/is (nil? (c/entry-status base-cached-fn [1 1]))
+            "returns nil before any call")
+
+      (cached-fn 1 1)
+
+      (let [status (c/entry-status base-cached-fn [1 1])]
+        (t/is (some? status) "returns a map after a call")
+        (t/is (instance? java.time.Instant (:created-at status)))
+        (t/is (nil? (:last-hit status)) "no hits yet")
+        (t/is (= 0 (:hits status)))
+        (t/is (false? (:cold? status)))
+        (t/is (false? (:stale? status))))
+
+      (cached-fn 1 1)
+
+      (let [status (c/entry-status base-cached-fn [1 1])]
+        (t/is (= 1 (:hits status)))
+        (t/is (instance? java.time.Instant (:last-hit status))))
+
+      (t/is (nil? (c/entry-status base-cached-fn [9 9]))
+            "returns nil for args with no entry"))))
+
+(t/deftest entry-status-cold-stale-test
+  (tu/with-harness
+    (fn [{:keys [cached-fn base-cached-fn advance-clock!]}]
+      (cached-fn 1 1)
+
+      (advance-clock! c/default-ttl)
+      (let [status (c/entry-status base-cached-fn [1 1])]
+        (t/is (true? (:cold? status)) "cold after TTL elapses")
+        (t/is (false? (:stale? status))))
+
+      (advance-clock! (- c/default-max-age c/default-ttl))
+      (let [status (c/entry-status base-cached-fn [1 1])]
+        (t/is (true? (:stale? status)) "stale after max-age elapses")))))
+
+(t/deftest function-entries-test
+  (tu/with-harness
+    (fn [{:keys [cached-fn base-cached-fn]}]
+      (t/is (empty? (c/function-entries base-cached-fn))
+            "empty before any calls")
+
+      (cached-fn 1 1)
+      (cached-fn 1 2)
+
+      (let [entries (c/function-entries base-cached-fn)]
+        (t/is (= 2 (count entries)))
+        (t/is (every? #(instance? java.time.Instant (:created-at %)) entries))
+        (t/is (every? #(nil? (:last-hit %)) entries))
+        (t/is (every? #(false? (:cold? %)) entries))
+        (t/is (every? #(false? (:stale? %)) entries))
+        (t/is (= #{(list 1 1) (list 1 2)}
+                 (into #{} (map :args) entries)))))))
+
 (t/deftest function-error-caching-bug-test
   "Test that demonstrates the critical bug where function exceptions get cached forever.
    When a cached function throws an exception, the put-queue entry should be cleared
