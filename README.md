@@ -139,7 +139,7 @@ For bulk operations that might trigger multiple maintenance runs, you can use `w
   )
 ```
 
-### Cache Entry Introspection
+### Cache entry introspection
 
 You can inspect the status of a specific cache entry, or all entries for a cached function, directly from the cache handle — without a separate database connection or knowledge of the internal schema:
 
