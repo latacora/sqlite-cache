@@ -255,7 +255,7 @@
       (update :cold? pos?)
       (update :stale? pos?)))
 
-(defn ^:private status-base-query [func-name & extra-cols]
+(defn ^:private status-base-query [func-name & [{:keys [extra-cols]}]]
   (-> (apply h/select :hits
              [maint/cold? :cold?]
              [maint/stale? :stale?]
@@ -296,7 +296,7 @@
   - :stale?      true if past max-age (will be evicted unconditionally)"
   [cached-fn]
   (let [{:keys [read-conn func-name]} (meta cached-fn)
-        q (status-base-query func-name :args)]
+        q (status-base-query func-name {:extra-cols [:args]})]
     (->> (db/exec! read-conn q)
          (map #(-> % (update :args ser/deserialize) coerce-status-row)))))
 
