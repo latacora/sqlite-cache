@@ -144,7 +144,7 @@ For bulk operations that might trigger multiple maintenance runs, you can use `w
 You can inspect the status of a specific cache entry, or all entries for a cached function, directly from the cache handle — without a separate database connection or knowledge of the internal schema:
 
 ```clojure
-(require '[com.latacora.sqlite-cache.core :as cache])
+;; cached-api-call is the value returned by cache/cache (see Basic Usage above)
 
 ;; Single-entry lookup: pass the args you would pass to the cached fn
 (cache/entry-status cached-api-call {:query "something"})
