@@ -279,7 +279,7 @@
   - :stale?      true if past max-age (will be evicted unconditionally)"
   [cached-fn cache-args]
   (let [{:keys [read-conn func-name args-cache-key]} (meta cached-fn)
-        serialized-args (ser/serialize (args-cache-key (seq cache-args)))
+        serialized-args (-> cache-args seq args-cache-key ser/serialize)
         q (-> (status-base-query func-name)
               (h/where [:= :args serialized-args]))]
     (some-> (db/exec-one! read-conn q) coerce-status-row)))
