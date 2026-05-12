@@ -277,9 +277,9 @@
   - :hits        number of cache hits
   - :cold?       true if past TTL (evictable if not re-hit soon)
   - :stale?      true if past max-age (will be evicted unconditionally)"
-  [cached-fn cache-args]
+  [cached-fn & cache-args]
   (let [{:keys [read-conn func-name args-cache-key]} (meta cached-fn)
-        serialized-args (-> cache-args seq args-cache-key ser/serialize)
+        serialized-args (-> cache-args args-cache-key ser/serialize)
         q (-> (status-base-query func-name)
               (h/where [:= :args serialized-args]))]
     (some-> (db/exec-one! read-conn q) coerce-status-row)))

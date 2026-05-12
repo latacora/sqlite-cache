@@ -147,7 +147,7 @@ You can inspect the status of a specific cache entry, or all entries for a cache
 (require '[com.latacora.sqlite-cache.core :as cache])
 
 ;; Single-entry lookup: pass the args you would pass to the cached fn
-(cache/entry-status cached-api-call [{:query "something"}])
+(cache/entry-status cached-api-call {:query "something"})
 ;; => {:created-at #inst "2026-05-10T14:32:00Z"
 ;;     :last-hit   #inst "2026-05-12T09:00:00Z"   ; nil if never re-hit
 ;;     :hits       7
