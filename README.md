@@ -82,8 +82,42 @@ io.github.latacora/sqlite-cache {:git/url "https://github.com/latacora/sqlite-ca
   :func-name "custom-function-name"                ;; Name for the cache (defaults to namespace/name for vars)
   :ttl (* 60 60 24)                                ;; TTL in seconds (default: 3 days)
   :max-age (* 60 60 24 7)                          ;; Max age in seconds (default: 1 week)
-  :args-cache-key (fn [args] (first args))})       ;; Function to transform args to cache key (default: identity)
+  :args-cache-key (fn [args] (first args))         ;; Function to transform args to cache key (default: identity)
+  :handlers {:write {SomeClass write-handler}      ;; Optional extra Transit handlers; see below
+             :read  {"some-tag" read-handler}}})
 ```
+
+### Supported types
+
+The cache uses [transit-canon](https://github.com/latacora/transit-canon) for serialization, so out of the box it supports:
+
+- All Clojure data structures and primitives (keywords, symbols, vectors, maps, sets, records, ratios, ...)
+- All Transit built-ins (UUIDs, URIs, `java.util.Date`, BigInteger, BigDecimal, byte arrays, ...)
+- All 15 `java.time.*` types ([time-literals](https://github.com/henryw374/time-literals) coverage: `LocalDate`, `Instant`, `Duration`, `ZonedDateTime`, `Period`, `Year`, `MonthDay`, etc.)
+- `java.util.regex.Pattern` (preserving flags)
+- `clojure.lang.TaggedLiteral` (write-only — see below)
+
+For anything else — `java.nio.file.Path`, `java.util.Locale`, custom Java value types, etc. — pass `:handlers` when constructing the cache:
+
+```clojure
+(require '[cognitect.transit :as transit])
+
+(def cached-fn
+  (cache/cache
+   {:func my-fn :func-name "my-fn" :db db
+    :handlers
+    {:write {java.util.Locale
+             (transit/write-handler
+              (constantly "locale")
+              (fn [^java.util.Locale l] (.toLanguageTag l)))}
+     :read  {"locale"
+             (transit/read-handler
+              (fn [tag] (java.util.Locale/forLanguageTag tag)))}}}))
+```
+
+User-supplied handlers override the built-in defaults for the same class or tag, but transit-canon's underlying canonical handlers (map/set sorting, integer→BigInt) always win — those are required for cache-key correctness.
+
+> Note on `TaggedLiteral`: a value like `(tagged-literal 'foo {:x 1})` writes correctly but on read becomes a `cognitect.transit.TaggedValue` (or, if `'foo` happens to match a registered handler tag, the live deserialized value). Use `:handlers` to register read handlers for any tags you need.
 
 ### Cache Maintenance and Introspection
 
@@ -282,6 +316,8 @@ The cache uses Transit with JSON canonicalization and zstd compression for stori
 4. Reduced disk usage through compression
 
 All cached data (both arguments and results) are compressed using zstd compression level 3, providing a good balance between compression ratio and performance.
+
+For the list of types supported out of the box — and how to extend it for your own types — see [Supported types](#supported-types).
 
 ### Concurrency
 

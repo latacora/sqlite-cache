@@ -96,7 +96,7 @@
   ;; warrant shunting them off to a separate thread for processing, and that
   ;; hits can be done out-of-transaction and still be almost always correct:
   ;; close enough for this purpose.
-  (let [{:keys [read-conn func-name]} opts
+  (let [{:keys [read-conn func-name handlers]} opts
         q (-> (h/select :id :result)
               (h/from :cache)
               (h/where
@@ -106,7 +106,7 @@
         {:keys [id result]} (db/exec-one! read-conn q)]
     (when id
       (queue-write! (assoc opts :op-fn hit! :entry-id id))
-      (ser/deserialize result))))
+      (ser/deserialize result {:handlers (:read handlers)}))))
 
 (defn ^:private hit!
   "Updates hit count and last-hit time for a cache entry."
@@ -121,10 +121,10 @@
 (defn ^:private put!
   "Puts a result into the cache based on the write-op map."
   [write-op]
-  (let [{:keys [write-conn func-name max-age ttl serialized-args result queue-key]} write-op
+  (let [{:keys [write-conn func-name max-age ttl serialized-args result queue-key handlers]} write-op
         values {:function func-name
                 :args serialized-args
-                :result (ser/serialize result)
+                :result (ser/serialize result {:handlers (:write handlers)})
                 :ttl ttl
                 :max-age max-age
                 :created-at [[:unixepoch]]
@@ -176,9 +176,9 @@
      (println "put-queue changed from" old "to" new))))
 
 (defn ^:private cached
-  [{:keys [func args-cache-key db] :as opts} & args]
+  [{:keys [func args-cache-key db handlers] :as opts} & args]
   (let [cache-args (args-cache-key args)
-        serialized-args (ser/serialize cache-args)]
+        serialized-args (ser/serialize cache-args {:handlers (:write handlers)})]
     (or
      (get! opts serialized-args)
      ;; Prevent more than 1 thread from trying to compute the same thing at once.
@@ -231,7 +231,18 @@
   - func-name: The function name for identification in the cache
   - ttl: Time to live in seconds
   - max-age: Maximum age in seconds
-  - args-cache-key: Function to transform arguments into cache key"
+  - args-cache-key: Function to transform arguments into cache key
+  - handlers: Optional extra transit handlers for types not covered by the
+    built-in defaults (which already include `java.time.*`,
+    `java.util.regex.Pattern`, and `clojure.lang.TaggedLiteral`). Shape:
+
+      {:write {SomeClass    a-write-handler}
+       :read  {\"some-tag\"   a-read-handler}}
+
+    Both sides are optional. User-supplied handlers override the built-in
+    defaults for the same class or tag, but transit-canon's underlying
+    canonical handlers (map/set sorting, Long->BigInt) always win — those
+    are required for cache-key correctness."
   [opts]
   (let [{:keys [db] :as opts} (merge default-opts opts)
         read-conn (jdbc/get-connection db)
@@ -278,8 +289,9 @@
   - :cold?       true if past TTL (evictable if not re-hit soon)
   - :stale?      true if past max-age (will be evicted unconditionally)"
   [cached-fn & cache-args]
-  (let [{:keys [read-conn func-name args-cache-key]} (meta cached-fn)
-        serialized-args (-> cache-args args-cache-key ser/serialize)
+  (let [{:keys [read-conn func-name args-cache-key handlers]} (meta cached-fn)
+        serialized-args (-> cache-args args-cache-key
+                            (ser/serialize {:handlers (:write handlers)}))
         q (-> (status-base-query func-name)
               (h/where [:= :args serialized-args]))]
     (some-> (db/exec-one! read-conn q) coerce-status-row)))
@@ -295,10 +307,13 @@
   - :cold?       true if past TTL (evictable if not re-hit soon)
   - :stale?      true if past max-age (will be evicted unconditionally)"
   [cached-fn]
-  (let [{:keys [read-conn func-name]} (meta cached-fn)
-        q (status-base-query func-name {:extra-cols [:args]})]
+  (let [{:keys [read-conn func-name handlers]} (meta cached-fn)
+        q (status-base-query func-name {:extra-cols [:args]})
+        read-opts {:handlers (:read handlers)}]
     (->> (db/exec! read-conn q)
-         (map #(-> % (update :args ser/deserialize) coerce-status-row)))))
+         (map #(-> %
+                   (update :args ser/deserialize read-opts)
+                   coerce-status-row)))))
 
 (defn cached-var
   "A helper function for `cache` that configures the cache name based on the

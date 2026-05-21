@@ -1,5 +1,6 @@
 (ns com.latacora.sqlite-cache.core-test
   (:require
+   [cognitect.transit :as transit]
    [com.latacora.sqlite-cache.core :as c]
    [com.latacora.sqlite-cache.maintenance :as maint]
    [com.latacora.sqlite-cache.test-utils :as tu]
@@ -10,7 +11,8 @@
    [honey.sql.helpers :as h]
    [honey.sql :as hsql])
   (:import
-   (java.time Instant)))
+   (java.time Instant LocalDate)
+   (java.util Locale)))
 
 (defn ^:private ->bool
   [x]
@@ -632,6 +634,39 @@
         (apply cached-fn args)
         (t/is (some? (apply c/entry-status base-cached-fn args))
               (str "entry-status finds row for args: " (pr-str args)))))))
+
+(t/deftest java-time-roundtrip-via-cache-test
+  (t/testing "java.time values round-trip through the cache without caller-supplied :handlers"
+    (let [d (LocalDate/of 2026 5 21)
+          inst (Instant/parse "2026-05-21T13:45:30Z")]
+      (tu/with-harness
+        {:f (fn [arg-date] {:date arg-date :as-of inst})}
+        (fn [{:keys [cached-fn n-calls]}]
+          (t/is (= 0 @n-calls))
+          (t/is (= {:date d :as-of inst} (cached-fn d)))
+          (t/is (= 1 @n-calls))
+          ;; Second call is a cache hit — only succeeds if both the cache key
+          ;; (LocalDate arg) and the cached value (map containing Instant)
+          ;; serialized cleanly the first time.
+          (t/is (= {:date d :as-of inst} (cached-fn d)))
+          (t/is (= 1 @n-calls)))))))
+
+(t/deftest custom-handlers-via-cache-test
+  (t/testing "Caller-supplied :handlers let us cache values of types not in the defaults"
+    (let [loc (Locale/forLanguageTag "en-US")
+          handlers {:write {Locale (transit/write-handler
+                                    (constantly "locale")
+                                    (fn [^Locale l] (.toLanguageTag l)))}
+                    :read  {"locale" (transit/read-handler
+                                      (fn [tag] (Locale/forLanguageTag tag)))}}]
+      (tu/with-harness
+        {:cache-opts {:handlers handlers}
+         :f (fn [^Locale l] {:locale l :upper (.toUpperCase (.toLanguageTag l))})}
+        (fn [{:keys [cached-fn n-calls]}]
+          (t/is (= {:locale loc :upper "EN-US"} (cached-fn loc)))
+          (t/is (= 1 @n-calls))
+          (t/is (= {:locale loc :upper "EN-US"} (cached-fn loc)))
+          (t/is (= 1 @n-calls)))))))
 
 (t/deftest function-error-caching-bug-test
   "Test that demonstrates the critical bug where function exceptions get cached forever.

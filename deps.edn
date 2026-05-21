@@ -13,7 +13,10 @@
 
   ;; Serialization (includes compression)
   io.github.latacora/transit-canon {:git/url "https://github.com/latacora/transit-canon"
-                                     :git/sha "06fe41e2522b83bab7e955e3473376500887abc6"}}
+                                     :git/sha "dd92ba15555b2df7ebc12a418d5b34621cda0a2e"}
+
+  ;; java.time transit handlers (default)
+  com.widdindustries/time-literals {:mvn/version "0.1.10"}}
 
  :aliases
  {:dev

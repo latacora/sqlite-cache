@@ -3,8 +3,14 @@
    [com.latacora.sqlite-cache.serialization :as ser]
    [clojure.string :as str]
    [clojure.test :as t]
+   [cognitect.transit :as transit]
    [com.gfredericks.test.chuck.clojure-test :refer [checking]]
-   [clojure.test.check.generators :as gen]))
+   [clojure.test.check.generators :as gen])
+  (:import
+   (java.time DayOfWeek Duration Instant LocalDate LocalDateTime LocalTime
+              Month MonthDay OffsetDateTime OffsetTime Period Year YearMonth
+              ZoneId ZonedDateTime)
+   (java.util.regex Pattern)))
 
 ;; Move the serializable-gen from core-test to here since it's really testing serialization
 (def serializable-gen
@@ -98,6 +104,65 @@
             "assoc order shouldn't affect serialization")
       (t/is (java.util.Arrays/equals (ser/serialize m3) (ser/serialize m4))
             "Reverse assoc order should produce same bytes"))))
+
+(t/deftest java-time-roundtrip-test
+  (t/testing "All 15 java.time types covered by time-literals round-trip without caller-supplied handlers"
+    (t/are [v] (= v (-> v ser/serialize ser/deserialize))
+      (LocalDate/of 2026 5 21)
+      (LocalTime/of 13 45 30)
+      (LocalDateTime/of 2026 5 21 13 45 30)
+      (Instant/parse "2026-05-21T13:45:30Z")
+      (ZonedDateTime/parse "2026-05-21T13:45:30+02:00[Europe/Brussels]")
+      (OffsetDateTime/parse "2026-05-21T13:45:30+02:00")
+      (OffsetTime/parse "13:45:30+02:00")
+      (ZoneId/of "Europe/Brussels")
+      (Period/ofDays 7)
+      (Duration/ofHours 3)
+      (Year/of 2026)
+      (YearMonth/of 2026 5)
+      (MonthDay/of 5 21)
+      DayOfWeek/THURSDAY
+      Month/MAY)))
+
+(defn ^:private transit-write-as-tag
+  "Produce uncompressed transit-JSON bytes for `obj` written under `tag`. Used
+  to construct payloads in alternate tag conventions for read-side interop tests."
+  ^bytes [obj tag rep-fn]
+  (let [out (java.io.ByteArrayOutputStream.)
+        h {(class obj) (transit/write-handler (constantly tag) rep-fn)}]
+    (transit/write (transit/writer out :json {:handlers h}) obj)
+    (.toByteArray out)))
+
+(t/deftest instant-alias-test
+  (t/testing "\"time/instant\" tag also deserializes to Instant for time-literals interop"
+    (let [inst (Instant/parse "2026-05-21T13:45:30Z")
+          bytes (transit-write-as-tag inst "time/instant" str)]
+      ;; ser/deserialize transparently accepts uncompressed transit JSON.
+      (t/is (= inst (ser/deserialize bytes))))))
+
+(t/deftest pattern-roundtrip-test
+  (t/testing "Pattern round-trips, preserving flags"
+    (let [original #"(?i)hello"
+          got ^Pattern (-> original ser/serialize ser/deserialize)]
+      (t/is (instance? Pattern got))
+      (t/is (= (str original) (str got)))
+      (t/is (= (Pattern/.flags original) (Pattern/.flags got))))))
+
+(t/deftest custom-handlers-test
+  (t/testing "Caller-supplied :handlers extend the defaults"
+    (let [;; java.util.Locale is *not* in our defaults
+          loc (java.util.Locale/forLanguageTag "en-US")
+          write-h {java.util.Locale
+                   (transit/write-handler
+                    (constantly "locale")
+                    (fn [^java.util.Locale l] (.toLanguageTag l)))}
+          read-h {"locale"
+                  (transit/read-handler
+                   (fn [tag] (java.util.Locale/forLanguageTag tag)))}
+          got (-> loc
+                  (ser/serialize {:handlers write-h})
+                  (ser/deserialize {:handlers read-h}))]
+      (t/is (= loc got)))))
 
 (t/deftest canonical-set-ordering-test
   (t/testing "Sets with same data serialize identically regardless of construction order"
