@@ -23,6 +23,8 @@
    [com.latacora.sqlite-cache.ddl :as ddl]
    [com.latacora.sqlite-cache.maintenance :as maint])
   (:import
+   (java.nio.file Files FileAlreadyExistsException)
+   (java.nio.file.attribute FileAttribute PosixFilePermissions)
    (java.util.concurrent LinkedBlockingQueue TimeUnit)))
 
 ;; This currently does not use clojure.core.cache, but it probably could stand
@@ -221,7 +223,8 @@
 
   This will ensure the cache is ready to use (has the appropriate schema,
   indexes, et cetera), creates missing parent directories for filesystem
-  `:dbname` paths, and returns a function with the same signature as the
+  `:dbname` paths, creates new POSIX database files with owner-only access,
+  and returns a function with the same signature as the
   function being cached.
 
   The returned function has metadata containing the full cache configuration,
@@ -249,8 +252,18 @@
   [opts]
   (let [{:keys [db] :as opts} (merge default-opts opts)
         _ (when-let [path (:dbname db)]
-            (when-not (str/starts-with? path "file:")
-              (io/make-parents path)))
+            (when-not (or (= path ":memory:") (str/starts-with? path "file:"))
+              (io/make-parents path)
+              (let [target (.toPath (.getAbsoluteFile (io/file path)))
+                    store (Files/getFileStore (.getParent target))]
+                (when (.supportsFileAttributeView store "posix")
+                  (try
+                    (Files/createFile
+                     target
+                     (into-array FileAttribute
+                                 [(PosixFilePermissions/asFileAttribute
+                                   (PosixFilePermissions/fromString "rw-------"))]))
+                    (catch FileAlreadyExistsException _ nil))))))
         read-conn (jdbc/get-connection db)
         write-conn (jdbc/get-connection db)
         write-queue (make-write-queue! write-conn)

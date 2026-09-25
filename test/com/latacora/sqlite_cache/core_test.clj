@@ -701,6 +701,12 @@
       (let [cached (c/cache {:db {:dbtype "sqlite" :dbname path}
                             :func inc :func-name "test/parents"})]
         (t/is (.isFile (io/file path)))
+        (let [target (.toPath (io/file path))]
+          (when (.supportsFileAttributeView (java.nio.file.Files/getFileStore target) "posix")
+            (t/is (= "rw-------"
+                     (java.nio.file.attribute.PosixFilePermissions/toString
+                      (java.nio.file.Files/getPosixFilePermissions
+                       target (make-array java.nio.file.LinkOption 0)))))))
         (t/is (= 2 (cached 1)))
         (tu/assert-n-entries! cached 1))
       (finally
