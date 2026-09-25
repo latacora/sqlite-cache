@@ -1,5 +1,6 @@
 (ns com.latacora.sqlite-cache.core-test
   (:require
+   [clojure.java.io :as io]
    [cognitect.transit :as transit]
    [com.latacora.sqlite-cache.core :as c]
    [com.latacora.sqlite-cache.maintenance :as maint]
@@ -690,3 +691,18 @@
 
         ;; Second call should succeed with the same arguments
         (t/is (= 10 (cached-fn 5)))))))
+
+(t/deftest creates-missing-cache-parent-directories
+  (let [root (io/file (System/getProperty "java.io.tmpdir")
+                      (str "sqlite-cache-parents-" (java.util.UUID/randomUUID)))
+        path (str (io/file root "nested" "cache.db"))]
+    (try
+      (t/is (not (.exists root)))
+      (let [cached (c/cache {:db {:dbtype "sqlite" :dbname path}
+                            :func inc :func-name "test/parents"})]
+        (t/is (.isFile (io/file path)))
+        (t/is (= 2 (cached 1)))
+        (tu/assert-n-entries! cached 1))
+      (finally
+        (doseq [file (reverse (file-seq root))]
+          (io/delete-file file true))))))

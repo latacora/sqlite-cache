@@ -14,6 +14,8 @@
   All cache analysis and cleanup (actually deleting expired records and
   VACUUMing afterwards) is done manually (see `maintain!`)."
   (:require
+   [clojure.java.io :as io]
+   [clojure.string :as str]
    [honey.sql.helpers :as h]
    [next.jdbc :as jdbc]
    [com.latacora.sqlite-cache.serialization :as ser]
@@ -218,7 +220,8 @@
   "Builds a cache with given opts.
 
   This will ensure the cache is ready to use (has the appropriate schema,
-  indexes, et cetera), and returns a function with the same signature as the
+  indexes, et cetera), creates missing parent directories for filesystem
+  `:dbname` paths, and returns a function with the same signature as the
   function being cached.
 
   The returned function has metadata containing the full cache configuration,
@@ -245,6 +248,9 @@
     are required for cache-key correctness."
   [opts]
   (let [{:keys [db] :as opts} (merge default-opts opts)
+        _ (when-let [path (:dbname db)]
+            (when-not (str/starts-with? path "file:")
+              (io/make-parents path)))
         read-conn (jdbc/get-connection db)
         write-conn (jdbc/get-connection db)
         write-queue (make-write-queue! write-conn)
