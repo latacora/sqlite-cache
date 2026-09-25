@@ -1,5 +1,6 @@
 (ns com.latacora.sqlite-cache.core-test
   (:require
+   [babashka.fs :as fs]
    [cognitect.transit :as transit]
    [com.latacora.sqlite-cache.core :as c]
    [com.latacora.sqlite-cache.maintenance :as maint]
@@ -690,3 +691,20 @@
 
         ;; Second call should succeed with the same arguments
         (t/is (= 10 (cached-fn 5)))))))
+
+(t/deftest creates-missing-cache-parent-directories
+  (let [root (fs/create-temp-dir {:prefix "sqlite-cache-parents-"})
+        path (fs/path root "nested" "cache.db")]
+    (try
+      (t/is (not (fs/exists? (fs/parent path))))
+      (let [cached (c/cache {:db {:dbtype "sqlite" :dbname (str path)}
+                            :func inc :func-name "test/parents"})]
+        (t/is (fs/regular-file? path))
+        (when-let [permissions (try
+                                 (fs/posix-file-permissions path)
+                                 (catch UnsupportedOperationException _ nil))]
+          (t/is (= "rw-------" (fs/posix->str permissions))))
+        (t/is (= 2 (cached 1)))
+        (tu/assert-n-entries! cached 1))
+      (finally
+        (fs/delete-tree root)))))

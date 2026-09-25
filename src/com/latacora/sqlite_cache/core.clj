@@ -14,6 +14,8 @@
   All cache analysis and cleanup (actually deleting expired records and
   VACUUMing afterwards) is done manually (see `maintain!`)."
   (:require
+   [babashka.fs :as fs]
+   [clojure.string :as str]
    [honey.sql.helpers :as h]
    [next.jdbc :as jdbc]
    [com.latacora.sqlite-cache.serialization :as ser]
@@ -21,6 +23,7 @@
    [com.latacora.sqlite-cache.ddl :as ddl]
    [com.latacora.sqlite-cache.maintenance :as maint])
   (:import
+   (java.nio.file FileAlreadyExistsException)
    (java.util.concurrent LinkedBlockingQueue TimeUnit)))
 
 ;; This currently does not use clojure.core.cache, but it probably could stand
@@ -214,11 +217,25 @@
    :ttl default-ttl
    :max-age default-max-age})
 
+(defn- prepare-db-file!
+  [{:keys [dbname]}]
+  (when (and dbname (not= dbname ":memory:")
+             (not (str/starts-with? dbname "file:")))
+    (let [target (fs/absolutize dbname)]
+      (fs/create-dirs (fs/parent target))
+      (try
+        (fs/create-file target {:posix-file-permissions "rw-------"})
+        (catch FileAlreadyExistsException _ nil)
+        ;; Let SQLite use platform defaults when POSIX permissions are unavailable.
+        (catch UnsupportedOperationException _ nil)))))
+
 (defn cache
   "Builds a cache with given opts.
 
   This will ensure the cache is ready to use (has the appropriate schema,
-  indexes, et cetera), and returns a function with the same signature as the
+  indexes, et cetera), creates missing parent directories for filesystem
+  `:dbname` paths, creates new POSIX database files with owner-only access,
+  and returns a function with the same signature as the
   function being cached.
 
   The returned function has metadata containing the full cache configuration,
@@ -245,6 +262,7 @@
     are required for cache-key correctness."
   [opts]
   (let [{:keys [db] :as opts} (merge default-opts opts)
+        _ (prepare-db-file! db)
         read-conn (jdbc/get-connection db)
         write-conn (jdbc/get-connection db)
         write-queue (make-write-queue! write-conn)
