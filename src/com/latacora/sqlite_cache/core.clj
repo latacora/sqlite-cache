@@ -218,6 +218,22 @@
    :ttl default-ttl
    :max-age default-max-age})
 
+(defn- prepare-db-file!
+  [{:keys [dbname]}]
+  (when (and dbname (not= dbname ":memory:")
+             (not (str/starts-with? dbname "file:")))
+    (io/make-parents dbname)
+    (let [target (-> dbname io/file .getAbsoluteFile .toPath)
+          posix? (-> target .getParent Files/getFileStore
+                     (.supportsFileAttributeView "posix"))]
+      (when posix?
+        (let [permissions (-> "rw-------"
+                              PosixFilePermissions/fromString
+                              PosixFilePermissions/asFileAttribute)]
+          (try
+            (Files/createFile target (into-array FileAttribute [permissions]))
+            (catch FileAlreadyExistsException _ nil)))))))
+
 (defn cache
   "Builds a cache with given opts.
 
@@ -251,19 +267,7 @@
     are required for cache-key correctness."
   [opts]
   (let [{:keys [db] :as opts} (merge default-opts opts)
-        _ (when-let [path (:dbname db)]
-            (when-not (or (= path ":memory:") (str/starts-with? path "file:"))
-              (io/make-parents path)
-              (let [target (.toPath (.getAbsoluteFile (io/file path)))
-                    store (Files/getFileStore (.getParent target))]
-                (when (.supportsFileAttributeView store "posix")
-                  (try
-                    (Files/createFile
-                     target
-                     (into-array FileAttribute
-                                 [(PosixFilePermissions/asFileAttribute
-                                   (PosixFilePermissions/fromString "rw-------"))]))
-                    (catch FileAlreadyExistsException _ nil))))))
+        _ (prepare-db-file! db)
         read-conn (jdbc/get-connection db)
         write-conn (jdbc/get-connection db)
         write-queue (make-write-queue! write-conn)

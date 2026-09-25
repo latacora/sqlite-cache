@@ -12,8 +12,10 @@
    [honey.sql.helpers :as h]
    [honey.sql :as hsql])
   (:import
+   (java.nio.file Files LinkOption)
+   (java.nio.file.attribute PosixFilePermissions)
    (java.time Instant LocalDate)
-   (java.util Locale)))
+   (java.util Locale UUID)))
 
 (defn ^:private ->bool
   [x]
@@ -694,19 +696,21 @@
 
 (t/deftest creates-missing-cache-parent-directories
   (let [root (io/file (System/getProperty "java.io.tmpdir")
-                      (str "sqlite-cache-parents-" (java.util.UUID/randomUUID)))
+                    (str "sqlite-cache-parents-" (UUID/randomUUID)))
         path (str (io/file root "nested" "cache.db"))]
     (try
       (t/is (not (.exists root)))
       (let [cached (c/cache {:db {:dbtype "sqlite" :dbname path}
                             :func inc :func-name "test/parents"})]
         (t/is (.isFile (io/file path)))
-        (let [target (.toPath (io/file path))]
-          (when (.supportsFileAttributeView (java.nio.file.Files/getFileStore target) "posix")
+        (let [target (-> path io/file .toPath)
+              posix? (-> target Files/getFileStore
+                         (.supportsFileAttributeView "posix"))]
+          (when posix?
             (t/is (= "rw-------"
-                     (java.nio.file.attribute.PosixFilePermissions/toString
-                      (java.nio.file.Files/getPosixFilePermissions
-                       target (make-array java.nio.file.LinkOption 0)))))))
+                     (-> target
+                         (Files/getPosixFilePermissions (make-array LinkOption 0))
+                         PosixFilePermissions/toString)))))
         (t/is (= 2 (cached 1)))
         (tu/assert-n-entries! cached 1))
       (finally
