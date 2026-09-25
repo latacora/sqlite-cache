@@ -1,6 +1,6 @@
 (ns com.latacora.sqlite-cache.core-test
   (:require
-   [clojure.java.io :as io]
+   [babashka.fs :as fs]
    [cognitect.transit :as transit]
    [com.latacora.sqlite-cache.core :as c]
    [com.latacora.sqlite-cache.maintenance :as maint]
@@ -12,10 +12,8 @@
    [honey.sql.helpers :as h]
    [honey.sql :as hsql])
   (:import
-   (java.nio.file Files LinkOption)
-   (java.nio.file.attribute PosixFilePermissions)
    (java.time Instant LocalDate)
-   (java.util Locale UUID)))
+   (java.util Locale)))
 
 (defn ^:private ->bool
   [x]
@@ -695,24 +693,18 @@
         (t/is (= 10 (cached-fn 5)))))))
 
 (t/deftest creates-missing-cache-parent-directories
-  (let [root (io/file (System/getProperty "java.io.tmpdir")
-                    (str "sqlite-cache-parents-" (UUID/randomUUID)))
-        path (str (io/file root "nested" "cache.db"))]
+  (let [root (fs/create-temp-dir {:prefix "sqlite-cache-parents-"})
+        path (fs/path root "nested" "cache.db")]
     (try
-      (t/is (not (.exists root)))
-      (let [cached (c/cache {:db {:dbtype "sqlite" :dbname path}
+      (t/is (not (fs/exists? (fs/parent path))))
+      (let [cached (c/cache {:db {:dbtype "sqlite" :dbname (str path)}
                             :func inc :func-name "test/parents"})]
-        (t/is (.isFile (io/file path)))
-        (let [target (-> path io/file .toPath)
-              posix? (-> target Files/getFileStore
-                         (.supportsFileAttributeView "posix"))]
-          (when posix?
-            (t/is (= "rw-------"
-                     (-> target
-                         (Files/getPosixFilePermissions (make-array LinkOption 0))
-                         PosixFilePermissions/toString)))))
+        (t/is (fs/regular-file? path))
+        (when-let [permissions (try
+                                 (fs/posix-file-permissions path)
+                                 (catch UnsupportedOperationException _ nil))]
+          (t/is (= "rw-------" (fs/posix->str permissions))))
         (t/is (= 2 (cached 1)))
         (tu/assert-n-entries! cached 1))
       (finally
-        (doseq [file (reverse (file-seq root))]
-          (io/delete-file file true))))))
+        (fs/delete-tree root)))))

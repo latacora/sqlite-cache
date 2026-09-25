@@ -14,7 +14,7 @@
   All cache analysis and cleanup (actually deleting expired records and
   VACUUMing afterwards) is done manually (see `maintain!`)."
   (:require
-   [clojure.java.io :as io]
+   [babashka.fs :as fs]
    [clojure.string :as str]
    [honey.sql.helpers :as h]
    [next.jdbc :as jdbc]
@@ -23,8 +23,7 @@
    [com.latacora.sqlite-cache.ddl :as ddl]
    [com.latacora.sqlite-cache.maintenance :as maint])
   (:import
-   (java.nio.file Files FileAlreadyExistsException)
-   (java.nio.file.attribute FileAttribute PosixFilePermissions)
+   (java.nio.file FileAlreadyExistsException)
    (java.util.concurrent LinkedBlockingQueue TimeUnit)))
 
 ;; This currently does not use clojure.core.cache, but it probably could stand
@@ -222,17 +221,13 @@
   [{:keys [dbname]}]
   (when (and dbname (not= dbname ":memory:")
              (not (str/starts-with? dbname "file:")))
-    (io/make-parents dbname)
-    (let [target (-> dbname io/file .getAbsoluteFile .toPath)
-          posix? (-> target .getParent Files/getFileStore
-                     (.supportsFileAttributeView "posix"))]
-      (when posix?
-        (let [permissions (-> "rw-------"
-                              PosixFilePermissions/fromString
-                              PosixFilePermissions/asFileAttribute)]
-          (try
-            (Files/createFile target (into-array FileAttribute [permissions]))
-            (catch FileAlreadyExistsException _ nil)))))))
+    (let [target (fs/absolutize dbname)]
+      (fs/create-dirs (fs/parent target))
+      (try
+        (fs/create-file target {:posix-file-permissions "rw-------"})
+        (catch FileAlreadyExistsException _ nil)
+        ;; Let SQLite use platform defaults when POSIX permissions are unavailable.
+        (catch UnsupportedOperationException _ nil)))))
 
 (defn cache
   "Builds a cache with given opts.
