@@ -87,6 +87,11 @@ io.github.latacora/sqlite-cache {:git/url "https://github.com/latacora/sqlite-ca
              :read  {"some-tag" read-handler}}})
 ```
 
+Filesystem `:dbname` paths may include missing parent directories; `cache`
+creates them before opening SQLite. New filesystem databases on POSIX systems
+are created with mode `0600`; existing files keep their permissions. SQLite
+URI paths (`file:...`) and in-memory databases are passed through unchanged.
+
 ### Supported types
 
 The cache uses [transit-canon](https://github.com/latacora/transit-canon) for serialization, so out of the box it supports:
