@@ -92,6 +92,42 @@ creates them before opening SQLite. New filesystem databases on POSIX systems
 are created with mode `0600`; existing files keep their permissions. SQLite
 URI paths (`file:...`) and in-memory databases are passed through unchanged.
 
+### Background refresh
+
+Set `:refresh-after` to return a cached value immediately while refreshing it
+in the background on a read:
+
+```clojure
+(cache/cache
+ {:db {:dbtype "sqlite" :dbname "api-cache.db"}
+  :func expensive-api-call
+  :func-name "api-call"
+  :max-age (* 30 60)
+  :refresh-after 60})
+```
+
+This starts a refresh on the first read at or after one minute. To leave time
+for computation before expiry, use `:refresh-after {:before-max-age 120}`;
+with a thirty-minute `:max-age`, this starts refreshing at twenty-eight minutes.
+Both forms use seconds and must resolve to an age above zero and below
+`:max-age`. The convenience form is resolved when constructing the cache.
+
+Reads before the refresh threshold return the cached value. Reads at or after
+the threshold return it and start or join one background computation per key
+within the process. Missing entries and entries at or beyond their stored
+`:max-age` wait for that same computation. Refreshes run on Clojure's future
+pool; database writes continue through the SQLite writer queue. Refreshes are
+triggered by reads, so an idle entry may expire before a refresh starts.
+
+A successful refresh replaces the value and resets its age when stored.
+A failed refresh logs a warning, retains the previous value until its original
+expiry, and allows a later read to retry. Blocking computation failures still
+throw to the caller. TTL remains an idle eviction policy.
+
+Omitting `:refresh-after` (or setting it to `nil`) preserves blocking refresh
+on expiry. Existing database files need no migration; persisted entries retain
+their stored TTL and max-age until replaced.
+
 ### Supported types
 
 The cache uses [transit-canon](https://github.com/latacora/transit-canon) for serialization, so out of the box it supports:

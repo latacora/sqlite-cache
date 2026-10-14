@@ -24,7 +24,8 @@
    [com.latacora.sqlite-cache.maintenance :as maint])
   (:import
    (java.nio.file FileAlreadyExistsException)
-   (java.util.concurrent LinkedBlockingQueue TimeUnit)))
+   (java.util.concurrent LinkedBlockingQueue TimeUnit)
+   (java.util.logging Logger Level)))
 
 ;; This currently does not use clojure.core.cache, but it probably could stand
 ;; to be compatible with it. The problem with clojure.core.cache is that it's
@@ -61,55 +62,22 @@
 ;; ... and hence all entries would be cold.
 
 (defn ^:private get!
-  "Gets a value from the cache based on the provided options and cache arguments.
-
-  Options should include:
-  - conn: The database connection
-  - func-name: The function name for which the cache is being checked
-
-  Returns the cached value if found and not stale, or nil otherwise."
-  [opts cache-args]
-  ;; This function has to deal with a subtle concurrency problem. Originally,
-  ;; the attempt to get a cache entry and the hit counter increment happened
-  ;; inside of a transaction. If two threads try to get something form the
-  ;; cache and both hit, they'll both try to increment the hit count
-  ;; almost simultaneously. This results in an upgraded transaction:
-  ;;
-  ;; 1. Thread A starts transaction A, performs a SELECT, acquiring read lock
-  ;; 2. Thread B starts transaction B, performs a SELECT, acquiring read lock)
-  ;; 3. Thread A gets a hit, runs an UPDATE, acquiring intent-to-write-lock
-  ;; 4. Thread B gets a hit, runs an UPDATE, *fails to acquire the lock*
-  ;;
-  ;; Step 4 always fails because SQLite knows that A can't complete: it would
-  ;; need an exclusive lock to commit to the database, but it can't get it
-  ;; because B has the intent-to-write lock. This can't be solved by adding a
-  ;; busy handler to wait, because it's a deadlock: B also can't complete
-  ;; because A also has an intent-to-write lock preventing B from acquiring an
-  ;; exclusive lock.
-  ;;
-  ;; There are a few ways to solve this. One is to tell SQLite that all of these
-  ;; transactions require IMMEDIATE. That reduces reader concurrency to 1.
-  ;; Another is to do the cache hit outside of the transaction (because the
-  ;; first statement in the hit process is an UPDATE, SQLite knows it needs a
-  ;; write lock). We could even have a different thread worry about updating the
-  ;; hit counter: it's not critical for correctness, just an approximate
-  ;; statistical measure.
-  ;;
-  ;; For now, we're assuming that hit updates won't block for long enough to
-  ;; warrant shunting them off to a separate thread for processing, and that
-  ;; hits can be done out-of-transaction and still be almost always correct:
-  ;; close enough for this purpose.
-  (let [{:keys [read-conn func-name handlers]} opts
-        q (-> (h/select :id :result)
+  "Returns an entry with its value and refresh status, or nil when missing or stale."
+  [{:keys [read-conn func-name handlers refresh-after]} cache-args]
+  (let [refresh? (if refresh-after
+                   (maint/in-the-past [:+ :created-at refresh-after])
+                   [:inline 0])
+        q (-> (h/select :id :result [refresh? :refresh?])
               (h/from :cache)
               (h/where
                [:= :function func-name]
                [:= :args cache-args]
                [:not maint/stale?]))
-        {:keys [id result]} (db/exec-one! read-conn q)]
+        {:keys [id result refresh?]} (db/exec-one! read-conn q)]
     (when id
-      (queue-write! (assoc opts :op-fn hit! :entry-id id))
-      (ser/deserialize result {:handlers (:read handlers)}))))
+      {:id id
+       :value (ser/deserialize result {:handlers (:read handlers)})
+       :refresh? (pos? refresh?)})))
 
 (defn ^:private hit!
   "Updates hit count and last-hit time for a cache entry."
@@ -178,32 +146,61 @@
    (fn [_k _atom old new]
      (println "put-queue changed from" old "to" new))))
 
+(defn- computation!
+  [{:keys [func db] :as opts} cache-args serialized-args args]
+  (let [queue-key [db func cache-args]
+        computation
+        (delay
+          (try
+            ;; A refresh may have been stored since the caller read the old entry.
+            (let [entry (get! opts serialized-args)]
+              (if (and entry (not (:refresh? entry)))
+                (do
+                  (swap! put-queue dissoc queue-key)
+                  (:value entry))
+                (let [result (apply func args)]
+                  (queue-write! (assoc opts :op-fn put! :serialized-args serialized-args
+                                      :result result :queue-key queue-key))
+                  result)))
+            (catch Throwable e
+              (swap! put-queue dissoc queue-key)
+              (throw e))))
+        [before after] (swap-vals! put-queue update queue-key #(or % computation))]
+    [(get after queue-key) (not (contains? before queue-key))]))
+
 (defn ^:private cached
-  [{:keys [func args-cache-key db handlers] :as opts} & args]
+  [{:keys [args-cache-key handlers func-name] :as opts} & args]
   (let [cache-args (args-cache-key args)
         serialized-args (ser/serialize cache-args {:handlers (:write handlers)})]
-    (or
-     (get! opts serialized-args)
-     ;; Prevent more than 1 thread from trying to compute the same thing at once.
-     (let [queue-key [db func cache-args]]
-       (->
-        (swap!
-         put-queue update queue-key
-         (fn [maybe-delay]
-           (or
-            maybe-delay ;; Another thread is already working on this.
-            (delay
-              (try
-                (let [result (apply func args)]
-                  ;; Asynchronously write to cache, return immediately, rely on put-queue delay for other, simultaneous requests of the same data
-                  (queue-write! (assoc opts :op-fn put! :serialized-args serialized-args :result result :queue-key queue-key))
-                  result)
-                (catch Exception e
-                  ;; Clear put-queue entry on error so future calls can retry
-                  (swap! put-queue dissoc queue-key)
-                  (throw e)))))))
-        (get queue-key)
-        (deref))))))
+    (if-let [{:keys [id value refresh?]} (get! opts serialized-args)]
+      (do
+        (queue-write! (assoc opts :op-fn hit! :entry-id id))
+        (when refresh?
+          (let [[computation new?] (computation! opts cache-args serialized-args args)]
+            (when new?
+              (future
+                (try
+                  @computation
+                  (catch Throwable e
+                    (.log (Logger/getLogger "com.latacora.sqlite-cache") Level/WARNING
+                          (str "Background refresh failed for " func-name) e)))))))
+        value)
+      (let [[computation _] (computation! opts cache-args serialized-args args)]
+        @computation))))
+
+(defn- normalize-refresh-after
+  [{:keys [refresh-after max-age] :as opts}]
+  (if (nil? refresh-after)
+    opts
+    (let [before? (and (map? refresh-after)
+                       (= #{:before-max-age} (set (keys refresh-after))))
+          duration (if before? (:before-max-age refresh-after) refresh-after)
+          valid-duration? (and (number? duration) (number? max-age)
+                               (< 0 duration max-age))]
+      (when-not valid-duration?
+        (throw (ex-info ":refresh-after must be positive seconds below :max-age, or {:before-max-age seconds}"
+                        {:refresh-after refresh-after :max-age max-age})))
+      (assoc opts :refresh-after (if before? (- max-age duration) duration)))))
 
 (def default-opts
   "Default options for the cache function.
@@ -248,6 +245,9 @@
   - func-name: The function name for identification in the cache
   - ttl: Time to live in seconds
   - max-age: Maximum age in seconds
+  - refresh-after: Optional age in seconds at which a hit starts a background
+    refresh, or {:before-max-age seconds}. Must resolve to an age above zero
+    and below max-age. Missing or expired entries wait for the same computation.
   - args-cache-key: Function to transform arguments into cache key
   - handlers: Optional extra transit handlers for types not covered by the
     built-in defaults (which already include `java.time.*`,
@@ -261,7 +261,7 @@
     canonical handlers (map/set sorting, Long->BigInt) always win — those
     are required for cache-key correctness."
   [opts]
-  (let [{:keys [db] :as opts} (merge default-opts opts)
+  (let [{:keys [db] :as opts} (normalize-refresh-after (merge default-opts opts))
         _ (prepare-db-file! db)
         read-conn (jdbc/get-connection db)
         write-conn (jdbc/get-connection db)
