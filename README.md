@@ -94,39 +94,31 @@ URI paths (`file:...`) and in-memory databases are passed through unchanged.
 
 ### Background refresh
 
-Set `:refresh-after` to return a cached value immediately while refreshing it
-in the background on a read:
+`:refresh-after` opts into read-triggered background refresh:
 
 ```clojure
-(cache/cache
- {:db {:dbtype "sqlite" :dbname "api-cache.db"}
-  :func expensive-api-call
-  :func-name "api-call"
-  :max-age (* 30 60)
-  :refresh-after 60})
+{:max-age (* 30 60)
+ :refresh-after 60}                     ; eligible for refresh after one minute
+
+{:max-age (* 30 60)
+ :refresh-after {:before-max-age 120}}   ; eligible after twenty-eight minutes
 ```
 
-This starts a refresh on the first read at or after one minute. To leave time
-for computation before expiry, use `:refresh-after {:before-max-age 120}`;
-with a thirty-minute `:max-age`, this starts refreshing at twenty-eight minutes.
 Both forms use seconds and must resolve to an age above zero and below
-`:max-age`. The convenience form is resolved when constructing the cache.
+`:max-age`. The map is normalized at cache construction. On a read:
 
-Reads before the refresh threshold return the cached value. Reads at or after
-the threshold return it and start or join one background computation per key
-within the process. Missing entries and entries at or beyond their stored
-`:max-age` wait for that same computation. Refreshes run on Clojure's future
-pool; database writes continue through the SQLite writer queue. Refreshes are
-triggered by reads, so an idle entry may expire before a refresh starts.
+- Before `:refresh-after`, return the cached value.
+- At or after `:refresh-after`, return it and start or join a background refresh.
+- Missing or at/after the stored `:max-age`, wait for the shared computation.
 
-A successful refresh replaces the value and resets its age when stored.
-A failed refresh logs a warning, retains the previous value until its original
-expiry, and allows a later read to retry. Blocking computation failures still
-throw to the caller. TTL remains an idle eviction policy.
+Refreshes run on Clojure's future pool and remain shared until stored. Success
+resets the entry's age. Failure logs a warning and retains the old value until
+its original expiry; later reads retry. Blocking failures propagate.
 
-Omitting `:refresh-after` (or setting it to `nil`) preserves blocking refresh
-on expiry. Existing database files need no migration; persisted entries retain
-their stored TTL and max-age until replaced.
+Omitting `:refresh-after` or setting it to `nil` preserves existing behavior.
+There is no timer: idle entries are not refreshed. TTL remains an idle eviction
+policy. Existing databases need no migration; entries retain their stored TTL
+and max-age until replaced.
 
 ### Supported types
 

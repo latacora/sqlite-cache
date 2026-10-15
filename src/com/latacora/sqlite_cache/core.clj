@@ -64,6 +64,34 @@
 (defn ^:private get!
   "Returns an entry with its value and refresh status, or nil when missing or stale."
   [{:keys [read-conn func-name handlers refresh-after]} cache-args]
+  ;; This function has to deal with a subtle concurrency problem. Originally,
+  ;; the attempt to get a cache entry and the hit counter increment happened
+  ;; inside of a transaction. If two threads try to get something form the
+  ;; cache and both hit, they'll both try to increment the hit count
+  ;; almost simultaneously. This results in an upgraded transaction:
+  ;;
+  ;; 1. Thread A starts transaction A, performs a SELECT, acquiring read lock
+  ;; 2. Thread B starts transaction B, performs a SELECT, acquiring read lock)
+  ;; 3. Thread A gets a hit, runs an UPDATE, acquiring intent-to-write-lock
+  ;; 4. Thread B gets a hit, runs an UPDATE, *fails to acquire the lock*
+  ;;
+  ;; Step 4 always fails because SQLite knows that A can't complete: it would
+  ;; need an exclusive lock to commit to the database, but it can't get it
+  ;; because B has the intent-to-write lock. This can't be solved by adding a
+  ;; busy handler to wait, because it's a deadlock: B also can't complete
+  ;; because A also has an intent-to-write lock preventing B from acquiring an
+  ;; exclusive lock.
+  ;;
+  ;; There are a few ways to solve this. One is to tell SQLite that all of these
+  ;; transactions require IMMEDIATE. That reduces reader concurrency to 1.
+  ;; Another is to do the cache hit outside of the transaction (because the
+  ;; first statement in the hit process is an UPDATE, SQLite knows it needs a
+  ;; write lock). We could even have a different thread worry about updating the
+  ;; hit counter: it's not critical for correctness, just an approximate
+  ;; statistical measure.
+  ;;
+  ;; Hit updates are queued to the writer thread after lookup. Keeping writes
+  ;; out of the read transaction avoids the lock upgrade described above.
   (let [refresh? (if refresh-after
                    (maint/in-the-past [:+ :created-at refresh-after])
                    [:inline 0])
@@ -111,7 +139,7 @@
         (swap! put-queue dissoc queue-key)))))
 
 (def ^:private put-queue
-  "A queue map of `[db func args]` to a delay that will compute the result, put it
+  "A queue map of `[db func-name func args]` to a delay that will compute the result, put it
   in the cache, and remove itself from this queue.
 
   This is used to prevent more than one thread from trying to compute the same
@@ -147,8 +175,8 @@
      (println "put-queue changed from" old "to" new))))
 
 (defn- computation!
-  [{:keys [func db] :as opts} cache-args serialized-args args]
-  (let [queue-key [db func cache-args]
+  [{:keys [func func-name db] :as opts} cache-args serialized-args args]
+  (let [queue-key [db func-name func cache-args]
         computation
         (delay
           (try
@@ -189,18 +217,12 @@
         @computation))))
 
 (defn- normalize-refresh-after
-  [{:keys [refresh-after max-age] :as opts}]
-  (if (nil? refresh-after)
-    opts
-    (let [before? (and (map? refresh-after)
-                       (= #{:before-max-age} (set (keys refresh-after))))
-          duration (if before? (:before-max-age refresh-after) refresh-after)
-          valid-duration? (and (number? duration) (number? max-age)
-                               (< 0 duration max-age))]
-      (when-not valid-duration?
-        (throw (ex-info ":refresh-after must be positive seconds below :max-age, or {:before-max-age seconds}"
-                        {:refresh-after refresh-after :max-age max-age})))
-      (assoc opts :refresh-after (if before? (- max-age duration) duration)))))
+  [opts]
+  (update opts :refresh-after
+          (fn [refresh-after]
+            (if (map? refresh-after)
+              (- (:max-age opts) (:before-max-age refresh-after))
+              refresh-after))))
 
 (def default-opts
   "Default options for the cache function.
