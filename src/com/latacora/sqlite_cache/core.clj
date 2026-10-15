@@ -175,6 +175,19 @@
      (println "put-queue changed from" old "to" new))))
 
 (defn- computation!
+  "Returns `[shared-delay new?]` for a computation keyed by
+  `[db func-name func cache-args]`. Registration is atomic; `new?` identifies
+  the caller that registered the delay. Refresh callers schedule it only when
+  new; callers needing a value dereference it to run or join the computation.
+
+  On dereference, rechecks the cache because another refresh may have been
+  stored since the caller's lookup. A fresh entry supplies the value without
+  calling `func`. Otherwise, computes with `args` and queues an asynchronous
+  write; the value is available before that write completes.
+
+  The registration remains until `put!` finishes its database write, so readers
+  arriving before persistence share the result. Reusing a fresh entry or a
+  failure during lookup, computation, or enqueueing removes it immediately."
   [{:keys [func func-name db] :as opts} cache-args serialized-args args]
   (let [queue-key [db func-name func cache-args]
         computation
