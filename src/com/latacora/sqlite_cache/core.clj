@@ -24,7 +24,8 @@
    [com.latacora.sqlite-cache.maintenance :as maint])
   (:import
    (java.nio.file FileAlreadyExistsException)
-   (java.util.concurrent LinkedBlockingQueue TimeUnit)))
+   (java.util.concurrent LinkedBlockingQueue TimeUnit)
+   (java.util.logging Logger Level)))
 
 ;; This currently does not use clojure.core.cache, but it probably could stand
 ;; to be compatible with it. The problem with clojure.core.cache is that it's
@@ -61,14 +62,8 @@
 ;; ... and hence all entries would be cold.
 
 (defn ^:private get!
-  "Gets a value from the cache based on the provided options and cache arguments.
-
-  Options should include:
-  - conn: The database connection
-  - func-name: The function name for which the cache is being checked
-
-  Returns the cached value if found and not stale, or nil otherwise."
-  [opts cache-args]
+  "Returns an entry with its value and refresh status, or nil when missing or stale."
+  [{:keys [read-conn func-name handlers refresh-after]} cache-args]
   ;; This function has to deal with a subtle concurrency problem. Originally,
   ;; the attempt to get a cache entry and the hit counter increment happened
   ;; inside of a transaction. If two threads try to get something form the
@@ -95,21 +90,22 @@
   ;; hit counter: it's not critical for correctness, just an approximate
   ;; statistical measure.
   ;;
-  ;; For now, we're assuming that hit updates won't block for long enough to
-  ;; warrant shunting them off to a separate thread for processing, and that
-  ;; hits can be done out-of-transaction and still be almost always correct:
-  ;; close enough for this purpose.
-  (let [{:keys [read-conn func-name handlers]} opts
-        q (-> (h/select :id :result)
+  ;; Hit updates are queued to the writer thread after lookup. Keeping writes
+  ;; out of the read transaction avoids the lock upgrade described above.
+  (let [refresh? (if refresh-after
+                   (maint/in-the-past [:+ :created-at refresh-after])
+                   [:inline 0])
+        q (-> (h/select :id :result [refresh? :refresh?])
               (h/from :cache)
               (h/where
                [:= :function func-name]
                [:= :args cache-args]
                [:not maint/stale?]))
-        {:keys [id result]} (db/exec-one! read-conn q)]
+        {:keys [id result refresh?]} (db/exec-one! read-conn q)]
     (when id
-      (queue-write! (assoc opts :op-fn hit! :entry-id id))
-      (ser/deserialize result {:handlers (:read handlers)}))))
+      {:id id
+       :value (ser/deserialize result {:handlers (:read handlers)})
+       :refresh? (pos? refresh?)})))
 
 (defn ^:private hit!
   "Updates hit count and last-hit time for a cache entry."
@@ -143,7 +139,7 @@
         (swap! put-queue dissoc queue-key)))))
 
 (def ^:private put-queue
-  "A queue map of `[db func args]` to a delay that will compute the result, put it
+  "A queue map of `[db func-name func args]` to a delay that will compute the result, put it
   in the cache, and remove itself from this queue.
 
   This is used to prevent more than one thread from trying to compute the same
@@ -178,32 +174,68 @@
    (fn [_k _atom old new]
      (println "put-queue changed from" old "to" new))))
 
+(defn- computation!
+  "Returns `[shared-delay new?]` for a computation keyed by
+  `[db func-name func cache-args]`. Registration is atomic; `new?` identifies
+  the caller that registered the delay. Refresh callers schedule it only when
+  new; callers needing a value dereference it to run or join the computation.
+
+  On dereference, rechecks the cache because another refresh may have been
+  stored since the caller's lookup. A fresh entry supplies the value without
+  calling `func`. Otherwise, computes with `args` and queues an asynchronous
+  write; the value is available before that write completes.
+
+  The registration remains until `put!` finishes its database write, so readers
+  arriving before persistence share the result. Reusing a fresh entry or a
+  failure during lookup, computation, or enqueueing removes it immediately."
+  [{:keys [func func-name db] :as opts} cache-args serialized-args args]
+  (let [queue-key [db func-name func cache-args]
+        computation
+        (delay
+          (try
+            ;; A refresh may have been stored since the caller read the old entry.
+            (let [entry (get! opts serialized-args)]
+              (if (and entry (not (:refresh? entry)))
+                (do
+                  (swap! put-queue dissoc queue-key)
+                  (:value entry))
+                (let [result (apply func args)]
+                  (queue-write! (assoc opts :op-fn put! :serialized-args serialized-args
+                                      :result result :queue-key queue-key))
+                  result)))
+            (catch Throwable e
+              (swap! put-queue dissoc queue-key)
+              (throw e))))
+        [before after] (swap-vals! put-queue update queue-key #(or % computation))]
+    [(get after queue-key) (not (contains? before queue-key))]))
+
 (defn ^:private cached
-  [{:keys [func args-cache-key db handlers] :as opts} & args]
+  [{:keys [args-cache-key handlers func-name] :as opts} & args]
   (let [cache-args (args-cache-key args)
         serialized-args (ser/serialize cache-args {:handlers (:write handlers)})]
-    (or
-     (get! opts serialized-args)
-     ;; Prevent more than 1 thread from trying to compute the same thing at once.
-     (let [queue-key [db func cache-args]]
-       (->
-        (swap!
-         put-queue update queue-key
-         (fn [maybe-delay]
-           (or
-            maybe-delay ;; Another thread is already working on this.
-            (delay
-              (try
-                (let [result (apply func args)]
-                  ;; Asynchronously write to cache, return immediately, rely on put-queue delay for other, simultaneous requests of the same data
-                  (queue-write! (assoc opts :op-fn put! :serialized-args serialized-args :result result :queue-key queue-key))
-                  result)
-                (catch Exception e
-                  ;; Clear put-queue entry on error so future calls can retry
-                  (swap! put-queue dissoc queue-key)
-                  (throw e)))))))
-        (get queue-key)
-        (deref))))))
+    (if-let [{:keys [id value refresh?]} (get! opts serialized-args)]
+      (do
+        (queue-write! (assoc opts :op-fn hit! :entry-id id))
+        (when refresh?
+          (let [[computation new?] (computation! opts cache-args serialized-args args)]
+            (when new?
+              (future
+                (try
+                  @computation
+                  (catch Throwable e
+                    (.log (Logger/getLogger "com.latacora.sqlite-cache") Level/WARNING
+                          (str "Background refresh failed for " func-name) e)))))))
+        value)
+      (let [[computation _] (computation! opts cache-args serialized-args args)]
+        @computation))))
+
+(defn- normalize-refresh-after
+  [opts]
+  (update opts :refresh-after
+          (fn [refresh-after]
+            (if (map? refresh-after)
+              (- (:max-age opts) (:before-max-age refresh-after))
+              refresh-after))))
 
 (def default-opts
   "Default options for the cache function.
@@ -248,6 +280,9 @@
   - func-name: The function name for identification in the cache
   - ttl: Time to live in seconds
   - max-age: Maximum age in seconds
+  - refresh-after: Optional age in seconds at which a hit starts a background
+    refresh, or {:before-max-age seconds}. Must resolve to an age above zero
+    and below max-age. Missing or expired entries wait for the same computation.
   - args-cache-key: Function to transform arguments into cache key
   - handlers: Optional extra transit handlers for types not covered by the
     built-in defaults (which already include `java.time.*`,
@@ -261,7 +296,7 @@
     canonical handlers (map/set sorting, Long->BigInt) always win — those
     are required for cache-key correctness."
   [opts]
-  (let [{:keys [db] :as opts} (merge default-opts opts)
+  (let [{:keys [db] :as opts} (normalize-refresh-after (merge default-opts opts))
         _ (prepare-db-file! db)
         read-conn (jdbc/get-connection db)
         write-conn (jdbc/get-connection db)

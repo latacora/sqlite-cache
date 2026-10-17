@@ -92,6 +92,34 @@ creates them before opening SQLite. New filesystem databases on POSIX systems
 are created with mode `0600`; existing files keep their permissions. SQLite
 URI paths (`file:...`) and in-memory databases are passed through unchanged.
 
+### Background refresh
+
+`:refresh-after` opts into read-triggered background refresh:
+
+```clojure
+{:max-age (* 30 60)
+ :refresh-after 60}                     ; eligible for refresh after one minute
+
+{:max-age (* 30 60)
+ :refresh-after {:before-max-age 120}}   ; eligible after twenty-eight minutes
+```
+
+Both forms use seconds and must resolve to an age above zero and below
+`:max-age`. The map is normalized at cache construction. On a read:
+
+- Before `:refresh-after`, return the cached value.
+- At or after `:refresh-after`, return it and start or join a background refresh.
+- Missing or at/after the stored `:max-age`, wait for the shared computation.
+
+Refreshes run on Clojure's future pool and remain shared until stored. Success
+resets the entry's age. Failure logs a warning and retains the old value until
+its original expiry; later reads retry. Blocking failures propagate.
+
+Omitting `:refresh-after` or setting it to `nil` preserves existing behavior.
+There is no timer: idle entries are not refreshed. TTL remains an idle eviction
+policy. Existing databases need no migration; entries retain their stored TTL
+and max-age until replaced.
+
 ### Supported types
 
 The cache uses [transit-canon](https://github.com/latacora/transit-canon) for serialization, so out of the box it supports:
